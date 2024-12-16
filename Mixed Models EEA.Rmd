@@ -1,0 +1,1504 @@
+---
+title: "Mixed Models EEA"
+output: html_document
+date: "2024-12-14"
+---
+
+Librerias
+
+```{r load-packages, include=FALSE, warning=FALSE, message=FALSE}
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(emmeans)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(kableExtra)
+library(ggtext)
+library(grid)
+
+```
+
+
+Carga del dataset simulado
+```{r}
+data <- read.csv("SimulacionCamadas.csv")
+names(data)
+```
+
+
+```{r}
+columnas <- c(1, 2, 3, 6)
+data[columnas] <- lapply(data[columnas], factor)
+
+levels(data$droga)
+data$droga <- factor(data$droga, levels = c("Placebo", setdiff(levels(data$droga), "Placebo")))
+
+
+table(data$droga)
+length(unique(data$ID_camada))
+table(data$droga, data$sd_camada)
+
+```
+
+
+Vemos la media y el desvio del 'efecto_camada' segun cada nivel de 'sd_camada'
+```{r}
+data %>%
+  group_by(sd_camada) %>%
+  summarise(
+    media_efecto_camada = mean(efecto_camada, na.rm = TRUE),
+    sd_efecto_camada = sd(efecto_camada, na.rm = TRUE)
+  )
+
+```
+
+
+
+Ahora se extrae un subconjunto de 5 camadas aleatorias para cada nivel de desviación estándar (sd_camada) y luego se grafica el nivel de glucemia en funcion de la droga para cada nivel. 
+
+```{r}
+
+# Extrae 5 camadas al azar de cada nivel de sd de efecto camada
+set.seed(47)
+muestras_camadas <- data %>%
+  distinct(ID_camada, sd_camada) %>%
+  group_by(sd_camada) %>%
+  sample_n(5)
+
+# Filtro los datos correspondientes a las camadas seleccionadas
+data_muestra <- data %>%
+  semi_join(muestras_camadas, by = "ID_camada")
+
+# Creo los 4 ggplots para cada nivel de sd de camada
+plots <- lapply(unique(data_muestra$sd_camada), function(sd) {
+  ggplot(data_muestra %>% filter(sd_camada == sd), aes(x = droga, y = glucemia)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = as.factor(ID_camada)), width = 0.2, alpha = 0.7, size = 2) +
+    labs(title = paste("SD Camada:", sd),
+         x = "Droga",
+         y = "Glucemia",
+         color = "Camada") +
+    theme_minimal()
+})
+
+# Combinar los 4 plots en uno
+plot_grid(plotlist = plots, ncol = 2)
+
+
+```
+
+AGREGAR CONCLUSIONES 
+
+
+
+Ahora se comparan dos modelos, ANOVA y modelos mixtos, para los datos de glucemia, agrupados por cada nivel de camada.
+
+```{r}
+set.seed(47)
+
+# Selecciono 4 camadas al azar de cada nivel de sd_camada
+muestras_camadas <- data %>%
+  distinct(ID_camada, sd_camada) %>%
+  group_by(sd_camada) %>%
+  sample_n(4)
+
+# me quedo solo con esas camadas
+data_muestra <- data %>%
+  semi_join(muestras_camadas, by = "ID_camada")
+
+# Lista para almacenar los nombres de los modelos
+modelos_anova <- list()
+modelos_mixtos <- list()
+
+for (sd in unique(data_muestra$sd_camada)) {
+  # Subconjunto de datos para el nivel sd
+  data_sd <- data_muestra %>% filter(sd_camada == sd)
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_sd)
+  modelos_anova[[paste("ANOVA", sd)]] <- ModeloLineal
+  
+  # Modelo Mixto (con efectos aleatorios por ID_camada)
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_sd)
+  modelos_mixtos[[paste("Mixto", sd)]] <- ModeloMixto
+}
+
+# Tabla para resultados ANOVA
+anova_results <- lapply(modelos_anova, function(modelo) {
+  anova(modelo)
+})
+anova_results_df <- do.call(rbind, anova_results)
+
+# Tabla para resultados Mixtos
+mixtos_results <- lapply(modelos_mixtos, function(modelo) {
+  anova(modelo)
+})
+mixtos_results_df <- do.call(rbind, mixtos_results)
+
+# Imprimir tabla ANOVA
+cat("## Resultados ANOVA\n\n")
+knitr::kable(anova_results_df, format = "pandoc", caption = "Resultados de los Modelos ANOVA para cada SD de Camada")
+
+# Imprimir tabla Mixta
+cat("\n## Resultados Modelo Mixto\n\n")
+knitr::kable(mixtos_results_df, format = "pandoc", caption = "Resultados de los Modelos Mixtos para cada SD de Camada")
+
+```
+
+
+Ahora estudiamos los p-valores y intervalos de confianza para las diferencias entre tratamientos: 
+```{r}
+
+# Lista para almacenar los nombres de los modelos
+modelos_anova <- list()
+modelos_mixtos <- list()
+
+# Para cada nivel de sd_camada, ajustar los modelos ANOVA y mixto
+for (sd in unique(data_muestra$sd_camada)) {
+  # Subconjunto de datos para el nivel sd
+  data_sd <- data_muestra %>% filter(sd_camada == sd)
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_sd)
+  modelos_anova[[paste("ANOVA", sd)]] <- ModeloLineal
+  pvalor_anova <- anova(ModeloLineal)[["Pr(>F)"]][1]
+  
+  # Intervalo de Confianza para la diferencia entre Placebo y B
+  emmeans_modelo_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_placebo_b <- confint(emmeans_modelo_anova, level = 0.95)$contrasts
+  ic_placebo_b <- ic_placebo_b[grepl("Placebo - B", ic_placebo_b$contrast), c("lower.CL", "upper.CL")]
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_sd)
+  modelos_mixtos[[paste("Mixto", sd)]] <- ModeloMixto
+  pvalor_mixto <- anova(ModeloMixto)[["Pr(>Chisq)"]][1]
+  
+  # Intervalo de Confianza para la diferencia entre Placebo y B
+  emmeans_modelo_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_placebo_b_mixto <- confint(emmeans_modelo_mixto, level = 0.95)$contrasts
+  ic_placebo_b_mixto <- ic_placebo_b_mixto[grepl("Placebo - B", ic_placebo_b_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Gráfica de resultados
+  resultado_gráfico <- ggplot(data_sd, aes(x = droga, y = glucemia)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = as.factor(ID_camada)), width = 0.2, alpha = 0.7, size = 2) +
+    labs(title = paste("SD Camada:", sd),
+         x = "Droga",
+         y = "Glucemia",
+         color = "Camada") +
+    theme_minimal()
+  
+  # Presentación visual de resultados
+  print(resultado_gráfico)
+  
+  # Resultados tabulares con mejor formato
+  resultado_tabla <- data.frame(
+    Modelo = c(paste("ANOVA para SD Camada", sd), paste("Mixto para SD Camada", sd)),
+    `P-valor` = c(pvalor_anova, pvalor_mixto),
+    `IC para Placebo - B` = c(paste("[", ic_placebo_b$lower.CL, ", ", ic_placebo_b$upper.CL, "]"), 
+                              paste("[", ic_placebo_b_mixto$lower.CL, ", ", ic_placebo_b_mixto$upper.CL, "]"))
+  )
+  
+  # Formatear la tabla
+  print(kable(resultado_tabla, format = "html", digits = 3) %>% kable_styling())
+}
+```
+Se utiliza confint() para obtener intervalos de confianza para la diferencia de medias entre tratamientos (Placebo y B) para ambos modelos.
+Los p-valores indicarán si las diferencias observadas en los modelos ANOVA y mixtos son estadísticamente significativas.
+Los intervalos de confianza permiten evaluar si las diferencias son significativamente diferentes de cero y, por lo tanto, si los tratamientos tienen efectos distintos en glucemia.
+
+
+Ahora analizamos los intervalos de confianza (IC) al 95% para la diferencia entre el placebo y la droga 'B' en ambos modelos, para los cuatro casos de sd distintos (2.5, 5, 15, 25)
+
+En cada caso realizamos el mismo proceso:
+
+1) Hacemos un  muestreo con resposicion de 4 camadas y con los datos de esas muestras ajustamos un modelo lineal simple con la glucemia como variable dependiente y la droga como unica variable explicativa. Luego calculamos los contrastes de medias (diferencias entre niveles de droga) y por ultimo los IC del 95% para el contraste específico "Placebo - B".
+
+2) Con el mismo muestreo de 4 camadas, ajustamos un modelo mixto con la glucemia como variable dependiente, la droga como fija y un efecto aleatorio dado por ID_camada.
+
+3) Esto se repite en 100 iteraciones, y generamos dos dataframes con los límites inferior y superior de los IC de cada modelo, para cada iteración. 
+
+
+
+Funcion para realizar graficos
+```{r}
+# Función para calcular límites dinámicos del eje X
+calc_limites <- function(datos) {
+  all_lower <- c(datos$placebo_b_lower, datos$placebo_a_lower, datos$droga_a_b_lower)
+  all_upper <- c(datos$placebo_b_upper, datos$placebo_a_upper, datos$droga_a_b_upper)
+  c(min(all_lower), max(all_upper))
+}
+
+# Función para crear gráficos de intervalos con límites compartidos
+plot_intervalos <- function(datos) {
+  # Calcular límites globales del eje X
+  limites_x <- calc_limites(datos)
+  
+  # Función interna para determinar si un intervalo contiene a 0
+  contains_zero <- function(lower, upper) {
+    lower <= 0 & upper >= 0
+  }
+  
+  # Preparar lista de gráficos
+  graficos <- list(
+    placebo_b = {
+      df_placebo_b <- data.frame(
+        iteracion = 1:100,
+        lower = datos$placebo_b_lower,
+        upper = datos$placebo_b_upper
+      )
+      df_placebo_b$contains_zero <- mapply(contains_zero, df_placebo_b$lower, df_placebo_b$upper)
+      
+      ggplot(df_placebo_b, aes(x = lower, xmin = lower, xmax = upper, y = iteracion, color = contains_zero)) +
+        geom_errorbarh(height = 0.5) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+        scale_color_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +
+        labs(title = "Placebo - Droga B", 
+             x = "Intervalo de Confianza", 
+             y = "Iteración") +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        coord_cartesian(xlim = limites_x)
+    },
+    
+    placebo_a = {
+      df_placebo_a <- data.frame(
+        iteracion = 1:100,
+        lower = datos$placebo_a_lower,
+        upper = datos$placebo_a_upper
+      )
+      df_placebo_a$contains_zero <- mapply(contains_zero, df_placebo_a$lower, df_placebo_a$upper)
+      
+      ggplot(df_placebo_a, aes(x = lower, xmin = lower, xmax = upper, y = iteracion, color = contains_zero)) +
+        geom_errorbarh(height = 0.5) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+        scale_color_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +
+        labs(title = "Placebo - Droga A", 
+             x = "Intervalo de Confianza", 
+             y = "Iteración") +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        coord_cartesian(xlim = limites_x)
+    },
+    
+    droga_a_b = {
+      df_droga_a_b <- data.frame(
+        iteracion = 1:100,
+        lower = datos$droga_a_b_lower,
+        upper = datos$droga_a_b_upper
+      )
+      df_droga_a_b$contains_zero <- mapply(contains_zero, df_droga_a_b$lower, df_droga_a_b$upper)
+      
+      ggplot(df_droga_a_b, aes(x = lower, xmin = lower, xmax = upper, y = iteracion, color = contains_zero)) +
+        geom_errorbarh(height = 0.5) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+        scale_color_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +
+        labs(title = "Droga A - Droga B", 
+             x = "Intervalo de Confianza", 
+             y = "Iteración") +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        coord_cartesian(xlim = limites_x)
+    }
+  )
+  
+  return(graficos)
+}
+
+```
+
+Caso sd = 2.5
+```{r}
+
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_2_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_2_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 2.5
+data_sd_2_5 <- subset(data, sd_camada == 2.5)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_2_5$droga <- factor(data_sd_2_5$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_2_5$ID_camada), 4, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_2_5[data_sd_2_5$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_2_5$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_2_5$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova$placebo_b <- errores_anova$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_2_5$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_2_5$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova$placebo_a <- errores_anova$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_2_5$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_2_5$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova$droga_a_b <- errores_anova$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_2_5$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_2_5$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_b <- errores_mixto$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_2_5$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_2_5$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_a <- errores_mixto$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_2_5$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_2_5$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto$droga_a_b <- errores_mixto$droga_a_b + 1
+  }
+}
+
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_2_5)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_2_5)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+```
+
+Caso sd = 5 
+```{r}
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 5
+data_sd_5 <- subset(data, sd_camada == 5)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_5$droga <- factor(data_sd_5$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova_5 <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto_5 <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_5$ID_camada), 4, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_5[data_sd_5$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_5$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_5$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova_5$placebo_b <- errores_anova_5$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_5$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_5$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova_5$placebo_a <- errores_anova_5$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_5$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_5$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova_5$droga_a_b <- errores_anova_5$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_5$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_5$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto_5$placebo_b <- errores_mixto_5$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_5$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_5$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto_5$placebo_a <- errores_mixto_5$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_5$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_5$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto_5$droga_a_b <- errores_mixto_5$droga_a_b + 1
+  }
+}
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_5)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_5)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+
+```
+
+Caso sd = 15
+```{r}
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_15 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_15 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 15
+data_sd_15 <- subset(data, sd_camada == 15)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_15$droga <- factor(data_sd_15$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_15$ID_camada), 4, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_15[data_sd_15$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_15$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_15$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova$placebo_b <- errores_anova$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_15$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_15$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova$placebo_a <- errores_anova$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_15$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_15$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova$droga_a_b <- errores_anova$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_15$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_15$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_b <- errores_mixto$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_15$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_15$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_a <- errores_mixto$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_15$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_15$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto$droga_a_b <- errores_mixto$droga_a_b + 1
+  }
+}
+
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_15)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_15)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+
+titulo <- textGrob("Modelo lineal", gp = gpar(fontsize = 16, fontface = "bold"))
+
+# Disposición de los gráficos con el título
+grid.arrange(
+  titulo, 
+  arrangeGrob(
+    graficos_anova$placebo_b,
+    graficos_anova$placebo_a,
+    graficos_anova$droga_a_b,
+    ncol = 3
+  ),
+  nrow = 2,
+  heights = c(0.1, 0.9) # Ajusta las proporciones para el título y los gráficos
+)
+
+titulo <- textGrob("Modelo Mixto", gp = gpar(fontsize = 16, fontface = "bold"))
+
+# Disposición de los gráficos con el título
+grid.arrange(
+  titulo, 
+  arrangeGrob(
+    graficos_mixto$placebo_b,
+    graficos_mixto$placebo_a,
+    graficos_mixto$droga_a_b,
+    ncol = 3
+  ),
+  nrow = 2,
+  heights = c(0.1, 0.9) # Ajusta las proporciones para el título y los gráficos
+)
+```
+
+Caso sd = 25 
+
+```{r}
+
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_25 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_25 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 25
+data_sd_25 <- subset(data, sd_camada == 25)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_25$droga <- factor(data_sd_25$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_25$ID_camada), 4, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_25[data_sd_25$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_25$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_25$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova$placebo_b <- errores_anova$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_25$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_25$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova$placebo_a <- errores_anova$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_25$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_25$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova$droga_a_b <- errores_anova$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_25$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_25$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_b <- errores_mixto$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_25$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_25$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_a <- errores_mixto$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_25$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_25$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto$droga_a_b <- errores_mixto$droga_a_b + 1
+  }
+}
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_25)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_25)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+
+```
+
+Ahora hacemos el mismo analisis, pero con tamaño muestral de 8 camadas en lugar de 4.
+
+
+Caso sd = 2.5
+```{r}
+
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_2_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_2_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 2.5
+data_sd_2_5 <- subset(data, sd_camada == 2.5)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_2_5$droga <- factor(data_sd_2_5$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_2_5$ID_camada), 8, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_2_5[data_sd_2_5$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_2_5$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_2_5$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova$placebo_b <- errores_anova$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_2_5$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_2_5$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova$placebo_a <- errores_anova$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_2_5$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_2_5$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova$droga_a_b <- errores_anova$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_2_5$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_2_5$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_b <- errores_mixto$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_2_5$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_2_5$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_a <- errores_mixto$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_2_5$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_2_5$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto$droga_a_b <- errores_mixto$droga_a_b + 1
+  }
+}
+
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_2_5)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_2_5)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+```
+
+Caso sd = 5 
+```{r}
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_5 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 5
+data_sd_5 <- subset(data, sd_camada == 5)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_5$droga <- factor(data_sd_5$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova_5 <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto_5 <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_5$ID_camada), 8, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_5[data_sd_5$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_5$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_5$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova_5$placebo_b <- errores_anova_5$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_5$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_5$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova_5$placebo_a <- errores_anova_5$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_5$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_5$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova_5$droga_a_b <- errores_anova_5$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_5$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_5$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto_5$placebo_b <- errores_mixto_5$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_5$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_5$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto_5$placebo_a <- errores_mixto_5$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_5$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_5$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto_5$droga_a_b <- errores_mixto_5$droga_a_b + 1
+  }
+}
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_5)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_5)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+
+```
+
+Caso sd = 15
+```{r}
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_15 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_15 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 15
+data_sd_15 <- subset(data, sd_camada == 15)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_15$droga <- factor(data_sd_15$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_15$ID_camada), 8, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_15[data_sd_15$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_15$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_15$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova$placebo_b <- errores_anova$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_15$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_15$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova$placebo_a <- errores_anova$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_15$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_15$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova$droga_a_b <- errores_anova$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_15$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_15$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_b <- errores_mixto$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_15$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_15$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_a <- errores_mixto$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_15$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_15$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto$droga_a_b <- errores_mixto$droga_a_b + 1
+  }
+}
+
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_15)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_15)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+
+titulo <- textGrob("Modelo lineal", gp = gpar(fontsize = 16, fontface = "bold"))
+
+# Disposición de los gráficos con el título
+grid.arrange(
+  titulo, 
+  arrangeGrob(
+    graficos_anova$placebo_b,
+    graficos_anova$placebo_a,
+    graficos_anova$droga_a_b,
+    ncol = 3
+  ),
+  nrow = 2,
+  heights = c(0.1, 0.9) # Ajusta las proporciones para el título y los gráficos
+)
+
+titulo <- textGrob("Modelo Mixto", gp = gpar(fontsize = 16, fontface = "bold"))
+
+# Disposición de los gráficos con el título
+grid.arrange(
+  titulo, 
+  arrangeGrob(
+    graficos_mixto$placebo_b,
+    graficos_mixto$placebo_a,
+    graficos_mixto$droga_a_b,
+    ncol = 3
+  ),
+  nrow = 2,
+  heights = c(0.1, 0.9) # Ajusta las proporciones para el título y los gráficos
+)
+```
+
+Caso sd = 25 
+
+```{r}
+
+# Crear los vectores para guardar los intervalos (para 3 comparaciones)
+intervalos_anova_25 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+intervalos_mixto_25 <- data.frame(
+  placebo_b_lower = numeric(100), 
+  placebo_b_upper = numeric(100),
+  placebo_a_lower = numeric(100), 
+  placebo_a_upper = numeric(100),
+  droga_a_b_lower = numeric(100), 
+  droga_a_b_upper = numeric(100)
+)
+
+# Filtrar datos para sd_camada == 25
+data_sd_25 <- subset(data, sd_camada == 25)
+
+# Asegurar que droga es un factor con los niveles correctos
+data_sd_25$droga <- factor(data_sd_25$droga, levels = c("Placebo", "A", "B"))
+
+# Variables para seguimiento de errores
+errores_anova <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+errores_mixto <- list(
+  placebo_b = 0,
+  placebo_a = 0,
+  droga_a_b = 0
+)
+
+# Loop de 100 iteraciones
+set.seed(121)  # Aseguramos reproducibilidad
+for (i in 1:100) {
+  
+  # Muestreo de 4 camadas con reposición
+  camadas_muestreadas <- sample(unique(data_sd_25$ID_camada), 8, replace = TRUE)
+  
+  # Filtrar datos de las camadas seleccionadas
+  data_muestra <- data_sd_25[data_sd_25$ID_camada %in% camadas_muestreadas, ]
+  
+  # Asegurar que droga mantiene los niveles
+  data_muestra$droga <- factor(data_muestra$droga, levels = c("Placebo", "A", "B"))
+  
+  # Modelo ANOVA lineal
+  ModeloLineal <- lm(glucemia ~ droga, data = data_muestra)
+  emmeans_anova <- emmeans(ModeloLineal, pairwise ~ droga)
+  ic_anova <- confint(emmeans_anova, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones
+  ic_placebo_b <- ic_anova[grepl("Placebo - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a <- ic_anova[grepl("Placebo - A", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b <- ic_anova[grepl("A - B", ic_anova$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para ANOVA
+  if(nrow(ic_placebo_b) > 0) {
+    intervalos_anova_25$placebo_b_lower[i] <- ic_placebo_b$lower.CL
+    intervalos_anova_25$placebo_b_upper[i] <- ic_placebo_b$upper.CL
+  } else {
+    errores_anova$placebo_b <- errores_anova$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a) > 0) {
+    intervalos_anova_25$placebo_a_lower[i] <- ic_placebo_a$lower.CL
+    intervalos_anova_25$placebo_a_upper[i] <- ic_placebo_a$upper.CL
+  } else {
+    errores_anova$placebo_a <- errores_anova$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b) > 0) {
+    intervalos_anova_25$droga_a_b_lower[i] <- ic_droga_a_b$lower.CL
+    intervalos_anova_25$droga_a_b_upper[i] <- ic_droga_a_b$upper.CL
+  } else {
+    errores_anova$droga_a_b <- errores_anova$droga_a_b + 1
+  }
+  
+  # Modelo Mixto
+  ModeloMixto <- lmer(glucemia ~ droga + (1 | ID_camada), data = data_muestra)
+  emmeans_mixto <- emmeans(ModeloMixto, pairwise ~ droga)
+  ic_mixto <- confint(emmeans_mixto, level = 0.95)$contrasts
+  
+  # Extraer IC para las 3 comparaciones del modelo mixto
+  ic_placebo_b_mixto <- ic_mixto[grepl("Placebo - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_placebo_a_mixto <- ic_mixto[grepl("Placebo - A", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  ic_droga_a_b_mixto <- ic_mixto[grepl("A - B", ic_mixto$contrast), c("lower.CL", "upper.CL")]
+  
+  # Verificar y guardar intervalos para Modelo Mixto
+  if(nrow(ic_placebo_b_mixto) > 0) {
+    intervalos_mixto_25$placebo_b_lower[i] <- ic_placebo_b_mixto$lower.CL
+    intervalos_mixto_25$placebo_b_upper[i] <- ic_placebo_b_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_b <- errores_mixto$placebo_b + 1
+  }
+  
+  if(nrow(ic_placebo_a_mixto) > 0) {
+    intervalos_mixto_25$placebo_a_lower[i] <- ic_placebo_a_mixto$lower.CL
+    intervalos_mixto_25$placebo_a_upper[i] <- ic_placebo_a_mixto$upper.CL
+  } else {
+    errores_mixto$placebo_a <- errores_mixto$placebo_a + 1
+  }
+  
+  if(nrow(ic_droga_a_b_mixto) > 0) {
+    intervalos_mixto_25$droga_a_b_lower[i] <- ic_droga_a_b_mixto$lower.CL
+    intervalos_mixto_25$droga_a_b_upper[i] <- ic_droga_a_b_mixto$upper.CL
+  } else {
+    errores_mixto$droga_a_b <- errores_mixto$droga_a_b + 1
+  }
+}
+
+# Crear gráficos para ANOVA
+graficos_anova <- plot_intervalos(intervalos_anova_25)
+# Crear gráficos para Modelo Mixto
+graficos_mixto <- plot_intervalos(intervalos_mixto_25)
+
+
+grid.arrange(
+  graficos_anova$placebo_b,
+  graficos_anova$placebo_a,
+  graficos_anova$droga_a_b,
+  ncol = 3  
+)
+
+grid.arrange(
+  graficos_mixto$placebo_b,
+  graficos_mixto$placebo_a,
+  graficos_mixto$droga_a_b,
+  ncol = 3  
+)
+
+```
+
+```{r}
+
+
+```
